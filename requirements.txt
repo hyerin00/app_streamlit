@@ -4,3 +4,5 @@ geopandas
 plotly
 folium
 branca
+streamlit_folium
+
