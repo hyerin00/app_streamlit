@@ -6,13 +6,17 @@ import plotly.express as px
 import folium
 from streamlit_folium import st_folium
 from branca.colormap import linear
+from folium.features import DivIcon
+from branca.element import Template, MacroElement
+from branca.colormap import StepColormap
+from streamlit.components.v1 import html
 import base64
 
 
 # 🚗 붕붕 로고 + 타이틀
 st.set_page_config(layout="centered")
 st.markdown("<p style='text-align: left; font-size: 20px; color: gray;'>🚗 붕붕</p>", unsafe_allow_html=True)
-st.title("😴 졸음운전 데이터 분석 및 차량별 조회 시스템")
+st.title("😴 졸음운전 차량별 조회 시스템")
 
 # ✅ 데이터 불러오기
 df = pd.read_csv("drowsy_눈감은시간추가.csv")
@@ -52,30 +56,71 @@ with tab1:
 
     fig = px.bar(df_chart, x="시간대", y="졸음운전 건수", color="color",
                  color_discrete_map="identity", template="plotly_white")
-    fig.update_layout(title="🚨 시간대별 졸음운전 발생 건수", title_x=0.5,
-                      xaxis_title="시간대", yaxis_title="발생 건수", showlegend=False)
+    st.markdown("<p style='text-align:center;'>🚨 시간대별 졸음운전 발생 건수</p>", unsafe_allow_html=True)
+
+
+    fig.update_layout(
+        xaxis_title="시간대",
+        yaxis_title="발생 건수",
+        showlegend=False
+    )
     st.plotly_chart(fig, use_container_width=True)
+
 
     st.subheader("📍 졸음운전 발생 위치")
     if "건수" not in gdf.columns:
         gdf["건수"] = df_filtered.groupby("address").size().reindex(gdf["address"]).fillna(0).astype(int).values
 
     map1 = folium.Map(location=[37.4, 127.0], zoom_start=10, tiles="CartoDB positron")
-    colormap = linear.Reds_09.scale(gdf["건수"].min(), gdf["건수"].max())
+    # 🔴 색상 범위 기반 컬러맵 생성
+    # ✅ 색상 단계별 수동 컬러맵 정의
+    colormap = StepColormap(
+        colors=["#fee5d9", "#fcae91", "#fb6a4a", "#cb181d"],
+        index=[0, 5, 10, 15, 20],  # 색상 구간 기준
+        vmin=0, vmax=20
+    )
+    colormap.caption = ""  # 👉 숫자 눈금 제거
+    colormap.add_to(map1)  # 🎯 이건 꼭 있어야 색상 반영됨!
 
+    # ✅ 마커 추가
     for idx, row in gdf.iterrows():
         if row.geometry is not None and row.geometry.geom_type == "Point":
-        # 기존 CircleMarker 코드 작성
-
             folium.CircleMarker(
                 location=[row.geometry.y, row.geometry.x],
                 radius=max(7, min(row["건수"] / 5, 10)),
                 color="black", weight=1.5,
                 fill=True, fill_color=colormap(row["건수"]),
                 fill_opacity=0.9,
-                popup=folium.Popup(f"{row['address']}<br>건수: {row['건수']}", max_width=250)
+                tooltip=folium.Tooltip(f"{row['address']}<br>건수: {row['건수']}건")
             ).add_to(map1)
 
+    # ✅ 이모지 범례 (우측 하단 고정)
+    legend_html = """
+    {% macro html(this, kwargs) %}
+    <div style="
+        position: fixed;
+        bottom: 30px;
+        right: 30px;
+        z-index:9999;
+        background-color: white;
+        padding: 10px;
+        border-radius: 10px;
+        box-shadow: 0 0 8px rgba(0,0,0,0.3);
+        font-size: 14px;
+    ">
+        <b>● 색상 범례</b><br>
+        <i style="background:#fee5d9;width:20px;height:10px;display:inline-block;"></i> 적음<br>
+        <i style="background:#fcae91;width:20px;height:10px;display:inline-block;"></i> 보통<br>
+        <i style="background:#fb6a4a;width:20px;height:10px;display:inline-block;"></i> 많음<br>
+        <i style="background:#cb181d;width:20px;height:10px;display:inline-block;"></i> 매우 많음
+    </div>
+    {% endmacro %}
+    """
+    legend = MacroElement()
+    legend._template = Template(legend_html)
+    map1.get_root().add_child(legend)
+
+    # ✅ Streamlit에 표시
     st_folium(map1, width=700, height=550, returned_objects=[])
 
 
@@ -92,7 +137,20 @@ with tab2:
                 st.success(f"✅ 차량번호 {str(vehicle_number).zfill(4)}의 졸음운전 기록 {len(vehicle_data)}건을 찾았습니다!")
                 
                 with st.expander("📋 졸음운전 기록 목록", expanded=False):
-                    st.dataframe(vehicle_data[["address", "drowsy time"]])
+                    sorted_df = vehicle_data.sort_values("drowsy time", ascending=False).reset_index(drop=True)
+                    sorted_df["번호"] = range(1, len(sorted_df) + 1)
+
+                    # 컬럼명 변경
+                    sorted_df.rename(columns={"address": "도로명", "drowsy time": "졸음 시간"}, inplace=True)
+
+                    # 번호 컬럼을 가장 앞으로 배치
+                    display_df = sorted_df[["번호", "도로명", "졸음 시간"]]
+
+                    # ✅ 인덱스 숨기기
+                    st.dataframe(display_df, hide_index=True)
+
+
+
 
 
                 # 분석 기간 선택
@@ -108,28 +166,47 @@ with tab2:
                 ]
 
                 # 🔄 NaN 제외한 데이터로 분석 통일
-                filtered_valid = filtered[filtered["eye_closed_time"].notna()]
+                # NaN 제외 + 날짜 포함된 컬럼만 따로 선택
+                # 🔄 NaN 제외한 데이터로 분석 통일
+                filtered_valid = filtered[filtered["eye_closed_time"].notna()].copy()
+                filtered_valid["drowsy_time_str"] = filtered_valid["drowsy time"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
                 if not filtered.empty:
                     st.markdown(f"#### 🚦 {period} 운전 중 눈 감은 시간")
-                    
-                    # ⚠️ 히스토그램은 NaN 제외한 filtered_valid 사용
+
+                    # 히스토그램
                     fig = px.histogram(
                         filtered_valid,
                         x="eye_closed_time",
-                        nbins=8,
+                        histfunc="count",
+                        nbins=20,
                         labels={"eye_closed_time": "눈 감은 시간 (초)", "count": "횟수"},
                         color_discrete_sequence=["#007acc"],
-                        text_auto=True  # 👉 막대 위에 숫자 자동 표시
+                        text_auto=True
                     )
+
+                    # ✅ customdata에 날짜 추가
+                    fig.update_traces(
+                        xbins=dict(start=0, end=4, size=0.2),
+                        customdata=filtered_valid[["drowsy_time_str"]].to_numpy(),
+                        hovertemplate=(
+                            "눈 감은 시간: %{x}초<br>"
+                            "횟수: %{y}회<br>"
+                            "발생 시각: %{customdata[0]}"
+                        )
+                    )
+
+                    st.markdown(f"<p style='text-align:center;'> {period} (졸음 운전 마지막날 기준)</p>", unsafe_allow_html=True)
+
                     fig.update_layout(
                         xaxis=dict(title="눈 감은 시간 (초)", tick0=0, dtick=0.5, range=[0, 4]),
                         yaxis=dict(title="횟수", tick0=0, dtick=1, range=[0, 7]),
-                        title_x=0.5
                     )
-                    fig.update_traces(hovertemplate='눈 감은 시간: %{x}초<br>횟수: %{y}회')
+
 
                     st.plotly_chart(fig, use_container_width=True)
+
+
                     # ⚠ 경고/위험 텍스트
                     warn_count = ((filtered["eye_closed_time"] > 2) & (filtered["eye_closed_time"] < 3)).sum()
                     danger_count = (filtered["eye_closed_time"] >= 3).sum()
